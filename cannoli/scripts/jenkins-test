@@ -1,0 +1,98 @@
+#!/usr/bin/env bash
+
+set -e -x -v
+
+# make a tempdir for writing maven cruft to
+CANNOLI_MVN_TMP_DIR=$(mktemp -d -t cannoliTestMvnXXXXXXX)
+
+# add this tempdir to the poms...
+find . -name pom.xml \
+    -exec sed -i.bak \
+    -e "s:sun.io.serialization.extendedDebugInfo=true:sun.io.serialization.extendedDebugInfo=true -Djava.io.tmpdir=${CANNOLI_MVN_TMP_DIR}:g" \
+    {} \;
+find . -name "*.bak" -exec rm -f {} \;
+
+# variable declarations
+export PATH=${JAVA_HOME}/bin/:${PATH}
+export MAVEN_OPTS="-Xmx1536m -XX:MaxPermSize=1g -Dfile.encoding=utf-8"
+DIR=$( cd $( dirname ${BASH_SOURCE[0]} ) && pwd )
+PROJECT_ROOT=${DIR}/..
+VERSION=$(grep "<version>" ${PROJECT_ROOT}/pom.xml  | head -2 | tail -1 | sed 's/ *<version>//g' | sed 's/<\/version>//g')
+
+# is the hadoop version set?
+if ! [[ ${HADOOP_VERSION} ]];
+then
+    echo "HADOOP_VERSION environment variable is not set."
+    echo "Please set this variable before running."
+    
+    exit 1
+fi
+
+# is the spark version set?
+if ! [[ ${SPARK_VERSION} ]];
+then
+    echo "SPARK_VERSION environment variable is not set."
+    echo "Please set this variable before running."
+    
+    exit 1
+fi
+
+# print versions
+echo "Testing CANNOLI version ${VERSION} on Spark ${SPARK_VERSION} and Hadoop ${HADOOP_VERSION}"
+
+# first, build the sources, run the unit tests, and generate a coverage report
+mvn clean \
+    -Dhadoop.version=${HADOOP_VERSION} \
+    -Dspark.version=${SPARK_VERSION} 
+
+# if this is a pull request, we need to set the coveralls pr id
+if [[ ! -z $ghprbPullId ]];
+then
+    COVERALLS_PRB_OPTION="-DpullRequest=${ghprbPullId}"
+fi
+
+# coveralls token should not be visible
+set +x +v
+
+if [[ -z ${COVERALLS_REPO_TOKEN} ]];
+then
+    echo "Coveralls token is not set. Exiting..."
+    exit 1
+fi
+
+# if those pass, build the distribution package and the integration tests
+mvn -U \
+    test \
+    -P coverage,coveralls  scoverage:report coveralls:report \
+    -DrepoToken=${COVERALLS_REPO_TOKEN} ${COVERALLS_PRB_OPTION}
+
+# make verbose again
+set -x -v
+
+# we are done with maven, so clean up the maven temp dir
+find ${CANNOLI_MVN_TMP_DIR}
+rm -rf ${CANNOLI_MVN_TMP_DIR}
+
+find . -name pom.xml \
+    -exec sed -i.bak \
+    -e "s:sun.io.serialization.extendedDebugInfo=true -Djava.io.tmpdir=${CANNOLI_MVN_TMP_DIR}:sun.io.serialization.extendedDebugInfo=true:g" \
+    {} \;
+find . -name "*.bak" -exec rm -f {} \;
+
+if test -n "$(git status --porcelain)"
+then
+    echo "Applying move_to_xyz script marred a pom.xml file."
+    echo "Exiting..."
+    exit 1
+fi
+
+./scripts/format-source
+if test -n "$(git status --porcelain)"
+then
+    echo "Please run './scripts/format-source'"
+    exit 1
+fi
+
+echo
+echo "All the tests passed"
+echo
